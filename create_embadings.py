@@ -4,38 +4,40 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
 import google.generativeai as genai
-from tqdm import tqdm  # progress bar
+from tqdm import tqdm
+import uuid
 
+# -------------------------------------------------
 # Load environment variables
+# -------------------------------------------------
 load_dotenv()
 
-# -----------------------------
-# Config
-# -----------------------------
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "my_collection")
-EMBEDDING_SIZE = 768  # Matches text-embedding-004
+EMBEDDING_SIZE = 768
+DOCS_PATH = "docs/**/*.md"
 
+# -------------------------------------------------
 # Gemini Config
+# -------------------------------------------------
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 EMBED_MODEL = "models/text-embedding-004"
 
-# -----------------------------
-# Qdrant Cloud Client
-# -----------------------------
+# -------------------------------------------------
+# Qdrant Client
+# -------------------------------------------------
 QDRANT_URL = os.getenv("QDRANT_HOST")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-print("Type of Qdrant object:", type(client))
 
-# -----------------------------
-# Check collection
-# -----------------------------
+# -------------------------------------------------
+# Ensure Collection Exists
+# -------------------------------------------------
 try:
     client.get_collection(collection_name=COLLECTION_NAME)
-    print(f"Collection '{COLLECTION_NAME}' exists. Skipping creation.")
-except Exception as e:
-    print(f"Collection '{COLLECTION_NAME}' does not exist. Creating it now...")
+    print(f"✅ Collection '{COLLECTION_NAME}' exists")
+except Exception:
+    print(f"⚠️ Creating collection '{COLLECTION_NAME}'")
     client.recreate_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(
@@ -43,53 +45,67 @@ except Exception as e:
             distance=Distance.COSINE
         )
     )
-    print("Collection created successfully.\n")
 
-# -----------------------------
-# Read all markdown files
-# -----------------------------
-DOCS_PATH = "docs/**/*.md"
+# -------------------------------------------------
+# Chunking Function (IMPORTANT)
+# -------------------------------------------------
+def chunk_text(text, chunk_size=400, overlap=50):
+    words = text.split()
+    chunks = []
+
+    start = 0
+    while start < len(words):
+        end = start + chunk_size
+        chunk = " ".join(words[start:end])
+        chunks.append(chunk)
+        start += chunk_size - overlap
+
+    return chunks
+
+# -------------------------------------------------
+# Read & Embed Markdown Files
+# -------------------------------------------------
 files = glob(DOCS_PATH, recursive=True)
-
 points = []
-pid = 1
 
-print(f"Found {len(files)} markdown files. Generating embeddings...\n")
+print(f"\n📚 Found {len(files)} markdown files\n")
 
-for file in tqdm(files, desc="Embedding files", unit="file"):
+for file in tqdm(files, desc="Embedding markdown files", unit="file"):
     with open(file, "r", encoding="utf-8") as f:
         text = f.read()
 
-    print(f"Embedding file: {file}")
+    chunks = chunk_text(text)
 
-    # Create Gemini embedding
-    emb = genai.embed_content(
-        model=EMBED_MODEL,
-        content=text
-    )
-    vector = emb["embedding"]
-
-    points.append(
-        PointStruct(
-            id=pid,
-            vector=vector,
-            payload={
-                "text": text,
-                "file_path": file
-            }
+    for idx, chunk in enumerate(chunks):
+        emb = genai.embed_content(
+            model=EMBED_MODEL,
+            content=chunk
         )
-    )
-    pid += 1
 
-# -----------------------------
-# Upload to Cloud
-# -----------------------------
+        vector = emb["embedding"]
+
+        points.append(
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vector,
+                payload={
+                    "text": chunk,
+                    "source_file": file,
+                    "chunk_id": idx,
+                    "type": "textbook"
+                }
+            )
+        )
+
+# -------------------------------------------------
+# Upload to Qdrant
+# -------------------------------------------------
 if points:
-    print("\nUploading embeddings to Qdrant Cloud...")
+    print(f"\n📤 Uploading {len(points)} chunks to Qdrant...")
     client.upsert(
         collection_name=COLLECTION_NAME,
         points=points
     )
-    print(f"\nSuccessfully uploaded {len(points)} documents to '{COLLECTION_NAME}'!")
+    print("✅ Embedding & upload completed successfully!")
 else:
-    print("No files to upload.")
+    print("⚠️ No content found to embed.")
