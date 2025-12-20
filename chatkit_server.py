@@ -1,15 +1,16 @@
+# chatkit_server.py
+import os
 from dotenv import load_dotenv
-load_dotenv()
-
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import os
 import google.generativeai as genai
 from qdrant_client import QdrantClient
 
 # -------------------------------------------------
-# Environment Variables
+# Load environment variables
 # -------------------------------------------------
+load_dotenv()
+
 QDRANT_URL = os.getenv("QDRANT_HOST")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "my_collection")
@@ -25,21 +26,20 @@ qdrant = QdrantClient(
 print("✅ Connected to Qdrant")
 
 # -------------------------------------------------
-# Gemini Setup
+# Configure Gemini
 # -------------------------------------------------
 genai.configure(api_key=GOOGLE_API_KEY)
-
 EMBED_MODEL = "models/text-embedding-004"
 LLM = genai.GenerativeModel("gemini-2.5-flash-lite")
 
 # -------------------------------------------------
-# FastAPI App
+# FastAPI app setup
 # -------------------------------------------------
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Deploy ke liye "*" theek hai, production me restrict karein
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,35 +57,32 @@ def is_greeting(text: str) -> bool:
     return any(text == g or text.startswith(g + " ") for g in greetings)
 
 # -------------------------------------------------
-# RAG + Fallback (BOOK FIRST)
+# RAG + Fallback Function
 # -------------------------------------------------
 async def rag_query(question: str, selected_text: str = ""):
     print("\n🟡 USER QUESTION:", question)
-
     context_chunks = []
 
     try:
-        # 1️⃣ Generate embedding
+        # 1️⃣ Generate embedding for user query
         emb_response = genai.embed_content(
             model=EMBED_MODEL,
             content=question
         )
         user_vector = emb_response["embedding"]
 
-        # 2️⃣ Query Qdrant
-        search_results = qdrant.query_points(
+        # 2️⃣ Query Qdrant using updated search method
+        search_results = qdrant.search(
             collection_name=COLLECTION_NAME,
-            query=user_vector,
+            query_vector=user_vector,
             limit=5
         )
 
-        # 3️⃣ Extract textbook context using similarity score
-        MIN_SCORE = 0.35   # tune: 0.30 – 0.45
-
-        for point in search_results.points:
+        # 3️⃣ Extract relevant context based on similarity score
+        MIN_SCORE = 0.35  # Tune: 0.3 – 0.45
+        for point in search_results:
             score = point.score or 0
             text = point.payload.get("text", "")
-
             if score >= MIN_SCORE and text:
                 context_chunks.append(text)
 
@@ -98,12 +95,11 @@ async def rag_query(question: str, selected_text: str = ""):
 
     full_context = (
         "\n\n".join(context_chunks)
-        if context_chunks
-        else "No textbook context found."
+        if context_chunks else "No textbook context found."
     )
 
     # -------------------------------------------------
-    # Prompt (Textbook Priority)
+    # Prepare prompt
     # -------------------------------------------------
     prompt = f"""
 You are an expert tutor for **Physical AI and Humanoid Robotics**.
@@ -131,27 +127,20 @@ Answer:
         return "Sorry, I couldn't generate an answer right now."
 
 # -------------------------------------------------
-# API Endpoint
+# API Endpoint: Chat
 # -------------------------------------------------
 @app.post("/chat")
 async def chat(request: Request):
     data = await request.json()
-
     user_query = data.get("user_query", "")
     selected_text = data.get("selected_text", "")
 
     if not user_query.strip():
-        return {
-            "answer": "Please ask a question related to Physical AI or Humanoid Robotics."
-        }
+        return {"answer": "Please ask a question related to Physical AI or Humanoid Robotics."}
 
-    # 👋 Greeting → short reply
     if is_greeting(user_query):
-        return {
-            "answer": "Hello! 👋 You can ask me anything about Physical AI or Humanoid Robotics."
-        }
+        return {"answer": "Hello! 👋 You can ask me anything about Physical AI or Humanoid Robotics."}
 
-    # 🤖 RAG / LLM response
     answer = await rag_query(user_query, selected_text)
     return {"answer": answer}
 
@@ -160,6 +149,4 @@ async def chat(request: Request):
 # -------------------------------------------------
 @app.get("/")
 async def home():
-    return {
-        "message": "✅ Physical AI & Humanoid Robotics Chatbot Backend is running"
-    }
+    return {"message": "✅ Physical AI & Humanoid Robotics Chatbot Backend is running"}
